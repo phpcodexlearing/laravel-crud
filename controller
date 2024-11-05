@@ -1,0 +1,194 @@
+<?php
+
+namespace App\Http\Controllers;
+
+use App\Models\Category;
+use App\Models\Product;
+use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Storage;
+use Illuminate\Support\Facades\Validator;
+use Yajra\DataTables\Facades\DataTables;
+use Spatie\Image\Image; 
+
+class ProductController extends Controller
+{
+
+    public function index(Request $request)
+    {
+        if ($request->ajax()) {
+            $data = Product::with(['category', 'subCategory'])->latest()->get();
+            return DataTables::of($data)
+                ->addColumn('category', function ($data) {
+                    return $data->category->name ?? 'N/A';
+                })
+                ->addColumn('subCategory', function ($data) {
+                    return $data->subCategory->name ?? 'N/A';
+                })
+                ->addColumn('action', function ($data) {
+                   
+                    $button = '<button type="button" name="edit" onclick="productAddEdit(\'' . route('product.edit', ['id' => $data->id]) . '\')" id="' . $data->id . '" class="edit btn btn-primary btn-sm">Edit</button>';
+                    
+                    $button .= '&nbsp;&nbsp;&nbsp;<button type="button" name="view" onclick="productView(\'' . route('product.view', ['id' => $data->id]) . '\')" id="' . $data->id . '" class="edit btn btn-info btn-sm  text-white">View</button>';
+
+                    $button .= '&nbsp;&nbsp;&nbsp;<button type="button" name="edit" onclick="deleteFunction(\'' . route('delete.product', ['id' => $data->id]) . '\')" id="' . $data->id . '" class="delete btn btn-danger btn-sm">Delete</button>';
+                    return $button;
+                })
+                ->rawColumns(['action'])
+                ->make(true);
+        }
+    }
+    public function addEdit(Request $request)
+    {
+        DB::beginTransaction();
+        try {
+            $id = $request->id;
+            $rules =[
+                    'title' => 'required|string|max:30|min:2',
+                    'category_id' => 'required',
+                    'subcategory_id' => 'required',
+                    'description' => 'required',
+                    'tags' => 'required|array|min:1',
+                    'tags.*' => 'string',
+                    'type' => 'required|in:male,female',
+                    'product_price' => 'required|numeric',
+                ];
+                
+            if ($id) {
+                $rules['image_path'] = "image|mimes:jpeg,png,jpg|max:2048";
+            } else {
+                $rules['image_path'] = "required|image|mimes:jpeg,png,jpg|max:2048";
+            }
+            
+            $validate = Validator::make($request->all(),$rules,
+            [
+                'category_id.required' => 'Please select Category.',
+                'subcategory_id.required' => 'Please select Sub Category.',
+            ]);
+            if ($validate->fails()) {
+                return response()->json($validate->errors(),422);
+            }
+
+            $product = Product::where('id', "=", $id)->first();
+            $record = [
+                'title' => $request->title,
+                'category_id' => $request->category_id,
+                'sub_category_id' => $request->subcategory_id,
+                'description' => $request->description,
+                'tags' => implode(',', $request->tags),
+                'type' => $request->type,
+                'product_price' => $request->product_price,
+            ];
+            
+            if ($request->hasFile('image_path')) { 
+                if ($id && $product->image_path) { 
+                    $relativePath = str_replace('/storage/', '', $product->image_path); 
+                    if (Storage::disk('public')->exists($relativePath)) { 
+                        Storage::disk('public')->delete($relativePath); 
+                    } 
+                } 
+            
+                if ($id && $product->thumbnail_path) { 
+                    $relativePath = str_replace('/storage/', '', $product->thumbnail_path);             
+                    if (Storage::disk('public')->exists($relativePath)) { 
+                        Storage::disk('public')->delete($relativePath); 
+                    } 
+                } 
+                $originalImage = $request->file('image_path'); 
+                $testFolder = 'public/test';             
+                $resizeFolder = 'public/resize'; 
+                if (!Storage::exists($testFolder)) { 
+                    Storage::makeDirectory($testFolder); 
+                } 
+            
+                if (!Storage::exists($resizeFolder)) { 
+                    Storage::makeDirectory($resizeFolder); 
+                } 
+            
+                $originalPath = $originalImage->store($testFolder); 
+                $resizedImagePath = $resizeFolder . '/' . $originalImage->hashName(); 
+                
+                Image::load($originalImage->getRealPath()) 
+                    ->width(100) 
+                    ->height(100)
+                    ->save(storage_path('app/' . $resizedImagePath)); 
+                    
+                $record['image_path'] = Storage::url($originalPath);             
+                $record['thumbnail_path'] = Storage::url($resizedImagePath); 
+            
+            } 
+            $matchThese = ['id'=>$id];
+            $action = Product::updateOrCreate($matchThese,$record);
+            if ($id && $action) {
+                $msg = "Record updated successfully";
+            } else {
+                $msg = "Record created successfully";
+            }
+            DB::commit();
+
+            if ($action) {
+                return response()->json(['success' => true, 'result' => $msg, 'output' => $action]);
+            }
+            return response()->json(['success' => false, 'result' => "Somethings wrong"]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'result' => $e->getMessage()]);
+        }
+    }
+
+    public function fetchCategories()
+    {
+        $categories = Category::select('id', 'name')->where('sub_categories', 0)->get();
+        return response()->json($categories); 
+    }
+
+    public function fetchSubcategories(Request $request)
+        {
+            $subcategories = Category::select('id', 'name')
+                ->where('sub_categories', $request->data['category_id'])
+                ->get();
+            return response()->json($subcategories);
+        }
+
+    public function productEdit($id = null)
+    {
+        try {
+            if (isset($id)) {
+                $product = Product::with(['category', 'subCategory'])->find($id);
+            } else {
+                $product = null;
+            }
+            $view = view('product_edit', compact('product'))->render();
+            return response()->json(['success' => true, 'result' => $view]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'result' => $e->getMessage()]);
+        }
+    }
+    
+    public function viewProudct($id)
+    {
+        try {
+            $product = Product::with(['category', 'subCategory'])->find($id);
+            $view = view('product_view', compact('product'))->render();
+            return response()->json(['success' => true, 'result' => $view]);
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'result' => $e->getMessage()]);
+        }
+    }
+
+    public function destroy($id)
+    {
+        try {
+            if ($id) {
+                $del = Product::where('id', $id)->delete();
+                if ($del) {
+                    return response()->json(['success' => true, 'result' => "delete record"]);
+                } else {
+                    return response()->json(['success' => false, 'result' => "something wrong"]);
+                }
+            }
+        } catch (\Exception $e) {
+            return response()->json(['success' => false, 'result' => $e->getMessage()]);
+        }
+    }
+
+}
